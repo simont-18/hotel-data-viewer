@@ -283,7 +283,7 @@ function buildTable(data) {
     dataTable = $('#hotelTable').DataTable({
         dom: 'rt<"bottom-controls"lip>',
         fixedHeader: true,
-        pageLength: 50,
+        pageLength: 25,
         order: [[7, 'desc']],
         columnDefs: [
             { targets: 7, type: 'num' },
