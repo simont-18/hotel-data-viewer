@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Hotel Data Viewer</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/jquery.dataTables.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+<style>
+:root { --primary-color: #0078FF; --bg-color: #f4f4f4; --text-color: #333; }
+html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg-color); }
+
+/* Welcome screen */
+#welcomeScreen { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; background: white; z-index: 3000; transition: opacity 0.3s ease; }
+.drop-zone { border: 3px dashed #ccc; border-radius: 10px; padding: 40px 60px; text-align: center; transition: all 0.2s; background: #fafafa; }
+.drop-zone.drag-over { border-color: var(--primary-color); background: #e6f2ff; }
+.drop-zone h2 { margin-top: 0; color: #555; }
+.drop-zone p { color: #888; margin-bottom: 20px; }
+.btn { background: var(--primary-color); color: white; border: none; padding: 10px 20px; border-radius: 5px; font-size: 16px; cursor: pointer; font-weight: 600; transition: background 0.2s; }
+.btn:hover { background: #005ce6; }
+input[type="file"] { display: none; }
+
+/* App shell and tabs */
+#appContainer { display: none; height: 100%; flex-direction: column; }
+.tab-bar { display: flex; background: white; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); z-index: 1000; position: relative; align-items: center; }
+.tab-btn { padding: 15px 30px; background: none; border: none; font-size: 16px; font-weight: 600; cursor: pointer; color: #666; border-bottom: 3px solid transparent; transition: all 0.2s; }
+.tab-btn:hover { color: var(--primary-color); background: #f9f9f9; }
+.tab-btn.active { color: var(--primary-color); border-bottom-color: var(--primary-color); }
+#resetBtn { margin-left: auto; margin-right: 20px; padding: 8px 16px; background: white; color: var(--primary-color); border: 1px solid var(--primary-color); border-radius: 4px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+#resetBtn:hover { background: var(--primary-color); color: white; }
+.tab-content { flex-grow: 1; position: relative; overflow: hidden; }
+.tab-pane { position: absolute; inset: 0; display: none; overflow: auto; }
+.tab-pane.active { display: block; }
+
+/* Map, legend and tooltip */
+#map { height: 100%; width: 100%; background-color: #f4f4f4; }
+.legend { background: white; padding: 10px 12px; border-radius: 6px; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.3); font-size: 13px; line-height: 1.6; }
+.legend-title { font-weight: 700; margin-bottom: 4px; }
+.legend-item { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.legend-item input[type="checkbox"] { margin: 0; cursor: pointer; flex: 0 0 auto; }
+.legend-swatch { width: 14px; height: 14px; border-radius: 50%; border: 1px solid rgba(0, 0, 0, 0.3); flex: 0 0 auto; }
+.leaflet-tooltip.custom-tooltip { max-width: 280px !important; white-space: normal !important; width: 280px; }
+.hotel-tooltip { font-size: 13px; line-height: 1.4; width: 100%; box-sizing: border-box; }
+.hotel-tooltip h4 { margin: 0 0 6px 0; font-size: 14px; white-space: normal !important; overflow-wrap: break-word; word-wrap: break-word; line-height: 1.3; }
+.hotel-tooltip .row { display: flex; justify-content: space-between; gap: 10px; margin-top: 4px; }
+.hotel-tooltip .label { color: #666; }
+.hotel-tooltip .value { font-weight: 600; text-align: right; }
+#tableContainer a, .hotel-tooltip a { color: var(--primary-color); text-decoration: none; }
+#tableContainer a:hover, .hotel-tooltip a:hover { text-decoration: underline; }
+
+/* Data table, filter bar and Select2 pills */
+#tableContainer { padding: 20px; background: white; min-height: 100%; box-sizing: border-box; }
+table.dataTable thead th { border-bottom: 2px solid #ddd; }
+.filter-bar { display: flex; align-items: flex-start; width: max-content; min-width: 100%; box-sizing: border-box; padding: 0 0 8px; }
+.filter-bar .filter-cell { flex: 0 0 auto; box-sizing: border-box; padding: 0 6px; }
+.select2-container { width: 100% !important; font-size: 12px; }
+.select2-container--default .select2-selection--multiple { min-height: 34px; border: 1px solid #ccc; border-radius: 3px; }
+.select2-container--default .select2-selection--multiple .select2-selection__choice { background-color: var(--primary-color); color: white; border: none; border-radius: 3px; font-size: 11px; line-height: 16px; padding: 2px 6px 2px 20px; margin: 4px 4px 0 0; position: relative; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.select2-container--default .select2-selection--multiple .select2-selection__choice__display { padding-left: 0; padding-right: 0; }
+.select2-container--default .select2-selection--multiple .select2-selection__choice__remove { position: absolute; top: 0; bottom: 0; left: 0; display: flex; align-items: center; margin: 0; padding: 0 5px; border: none; border-radius: 3px 0 0 3px; background: transparent; color: white; font-size: 12px; line-height: 1; }
+.select2-container--default .select2-selection--multiple .select2-selection__choice__remove:hover { color: white; background: rgba(255, 255, 255, 0.2); }
+div.dataTables_filter { display: none; }
+#hotelTable_wrapper .bottom-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
+#hotelTable_wrapper .bottom-controls .dataTables_length, #hotelTable_wrapper .bottom-controls .dataTables_info, #hotelTable_wrapper .bottom-controls .dataTables_paginate { padding-top: 0 !important; margin: 0 !important; }
+.bucket-cell { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.bucket-cell .swatch { width: 14px; height: 14px; border-radius: 50%; border: 1px solid rgba(0, 0, 0, 0.3); flex: 0 0 auto; }
+</style>
+</head>
+
+<body>
+<!-- Welcome screen -->
+<div id="welcomeScreen"><div class="drop-zone" id="dropZone">
+    <h2>Welcome to the Hotel Viewer</h2>
+    <p>Select or drag &amp; drop your JSON file to begin</p>
+    <label for="jsonFile" class="btn">Choose JSON File</label>
+    <input type="file" id="jsonFile" accept=".json, .txt">
+</div></div>
+
+<!-- Main app -->
+<div id="appContainer">
+    <div class="tab-bar">
+        <button class="tab-btn active" data-target="tab-map">Map View</button>
+        <button class="tab-btn" data-target="tab-data">Data Table</button>
+        <button id="resetBtn">Load New File</button>
+    </div>
+    <div class="tab-content">
+        <div id="tab-map" class="tab-pane active"><div id="map"></div></div>
+        <div id="tab-data" class="tab-pane"><div id="tableContainer">
+            <div id="filterBar" class="filter-bar"></div>
+            <table id="hotelTable" class="display" style="width:100%">
+                <thead><tr>
+                    <th>Hotel</th><th>Stars</th><th>City</th><th>Area</th><th>Price / Night</th>
+                    <th>Total Price</th><th>Miles Earned</th><th>Miles / $</th><th>Miles / $ Bucket</th><th>GPS</th>
+                </tr></thead>
+                <tbody id="tableBody"></tbody>
+            </table>
+        </div></div>
+    </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+
+<script>
+// ---------------------------------------------------------------
+// State shared by both views
+// ---------------------------------------------------------------
+const RATE_BUCKETS = [
+    { key: '0-5',   label: '0 – 5',   color: '#9e9e9e', test: r => r < 5 },
+    { key: '5-10',  label: '5 – 10',  color: '#f2c744', test: r => r >= 5 && r < 10 },
+    { key: '10-15', label: '10 – 15', color: '#7bc96f', test: r => r >= 10 && r < 15 },
+    { key: '15+',   label: '15+',     color: '#1a7f37', test: r => r >= 15 }
+];
+// Default rate filter: only the two highest buckets are checked, and both
+// views start in that state.
+const DEFAULT_BUCKET_KEYS = ['10-15', '15+'];
+const selectedBuckets = new Set(DEFAULT_BUCKET_KEYS);
+
+let map, markerLayerGroup, legendControl, dataTable;
+let bucketFilterSelect = null;   // Select2 for the table's "Miles / $ Bucket" column
+let syncingBucketFilter = false;
+let jsonDataGlobal = [];
+let markersByIndex = new Map();   // hotel index -> { marker, latlng }
+let visiblePoints = [];
+let lastVisibleKey = '';
+let fitPending = false;
+
+const bucketForRate = rate => (RATE_BUCKETS.find(b => b.test(Number(rate))) || RATE_BUCKETS[0]).key;
+const getBucketMeta = key => RATE_BUCKETS.find(b => b.key === key) || RATE_BUCKETS[0];
+const stripHtml = d => $('<div>').html(d ?? '').text();
+const $id = id => document.getElementById(id);
+
+const welcomeScreen = $id('welcomeScreen'), appContainer = $id('appContainer'), fileInput = $id('jsonFile');
+const dropZone = $id('dropZone'), resetBtn = $id('resetBtn'), tableBody = $id('tableBody'), filterBar = $id('filterBar');
+const tabBtns = document.querySelectorAll('.tab-btn');
+const tabPanes = document.querySelectorAll('.tab-pane');
+
+// The table is the single source of truth: its applied rows (column filters +
+// bucket filter) drive the markers, and its draws are triggered by the map legend.
+$.fn.dataTable.ext.search.push((settings, searchData, index) => {
+    if (settings.nTable.id !== 'hotelTable') return true;
+    const row = settings.aoData[index];
+    return !row || !row.nTr || selectedBuckets.has(row.nTr.dataset.bucket);
+});
+
+// ---------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------
+function googleMapsUrl(name) {
+    return name ? `https://www.google.com/maps/search/${encodeURIComponent(name.trim()).replace(/%20/g, '+')}` : '';
+}
+
+function parseGps(gps) {
+    const parts = typeof gps === 'string' ? gps.split(',') : [];
+    if (parts.length < 2) return null;
+    const lat = parseFloat(parts[0]), lng = parseFloat(parts[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    return { lat, lng };
+}
+
+function tooltipHtml(h) {
+    const link = h.hotel ? `<a href="${googleMapsUrl(h.hotel)}" target="_blank" rel="noopener noreferrer">${h.hotel}</a>` : 'Unknown Hotel';
+    const row = (label, value) => `<div class="row"><span class="label">${label}</span><span class="value">${value}</span></div>`;
+    return `<div class="hotel-tooltip"><h4>${link}</h4>` +
+        row('City', h.city || 'N/A') + row('Area', h.area || 'N/A') +
+        row('Price / night', '$' + (h.pricePerNight ?? 'N/A')) + row('Total price', '$' + (h.priceUsd ?? 'N/A')) +
+        row('Miles earned', h.milesEarned?.toLocaleString() ?? 'N/A') + row('Miles / $', h.milesEarnedPerDollar ?? 'N/A') +
+        '</div>';
+}
+
+// ---------------------------------------------------------------
+// File handling and app lifecycle
+// ---------------------------------------------------------------
+['dragenter', 'dragover', 'dragleave', 'drop'].forEach(t => document.body.addEventListener(t, e => { e.preventDefault(); e.stopPropagation(); }));
+['dragenter', 'dragover'].forEach(t => dropZone.addEventListener(t, () => dropZone.classList.add('drag-over')));
+['dragleave', 'drop'].forEach(t => dropZone.addEventListener(t, () => dropZone.classList.remove('drag-over')));
+document.body.addEventListener('drop', e => { if (e.dataTransfer.files.length) processFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => processFile(e.target.files[0]));
+
+function processFile(file) {
+    if (!file) return;
+    if (appContainer.style.display === 'flex') clearAppState();
+    const reader = new FileReader();
+    reader.onload = e => {
+        try {
+            const json = JSON.parse(e.target.result);
+            if (!Array.isArray(json)) return alert('Error: The JSON file must contain an array of objects.');
+            jsonDataGlobal = json;
+            initializeApp(json);
+        } catch (err) {
+            console.error(err);
+            alert('Error parsing JSON file. Please ensure it is valid JSON.');
+        }
+    };
+    reader.readAsText(file);
+}
+
+function initializeApp(data) {
+    welcomeScreen.style.opacity = '0';
+    setTimeout(() => {
+        welcomeScreen.style.display = 'none';
+        appContainer.style.display = 'flex';
+        buildMap(data);
+        buildTable(data);
+    }, 300);
+}
+
+function clearAppState() {
+    if (map) { map.remove(); map = null; markerLayerGroup = null; legendControl = null; }
+    if (dataTable) { dataTable.destroy(); dataTable = null; }
+    $('#filterBar .column-filter').select2('destroy');
+    filterBar.innerHTML = '';
+    tableBody.innerHTML = '';
+    markersByIndex = new Map();
+    visiblePoints = [];
+    lastVisibleKey = '';
+    fitPending = false;
+    bucketFilterSelect = null;
+    syncingBucketFilter = false;
+    jsonDataGlobal = [];
+    tabBtns.forEach(b => b.classList.remove('active'));
+    tabPanes.forEach(p => p.classList.remove('active'));
+    document.querySelector('[data-target="tab-map"]').classList.add('active');
+    $id('tab-map').classList.add('active');
+}
+
+resetBtn.addEventListener('click', () => {
+    appContainer.style.display = 'none';
+    welcomeScreen.style.display = 'flex';
+    void welcomeScreen.offsetWidth;
+    welcomeScreen.style.opacity = '1';
+    clearAppState();
+    fileInput.value = '';
+    fileInput.click();
+});
+
+// ---------------------------------------------------------------
+// Tab switching
+// ---------------------------------------------------------------
+tabBtns.forEach(btn => btn.addEventListener('click', () => {
+    tabBtns.forEach(b => b.classList.toggle('active', b === btn));
+    tabPanes.forEach(p => p.classList.toggle('active', p.id === btn.dataset.target));
+    if (btn.dataset.target === 'tab-map') {
+        if (!map) return setTimeout(() => buildMap(jsonDataGlobal), 50);
+        map.invalidateSize();
+        if (fitPending) { fitPending = false; fitBoundsToPoints(visiblePoints); }
+    } else if (dataTable) {
+        // The table is built while hidden, so re-measure once it is visible.
+        requestAnimationFrame(() => { dataTable.columns.adjust(); syncFilterBarWidths(); });
+    }
+}));
+
+// ---------------------------------------------------------------
+// Data table
+// ---------------------------------------------------------------
+function buildTable(data) {
+    tableBody.innerHTML = '';
+    data.forEach((h, i) => {
+        const bucket = getBucketMeta(bucketForRate(h.milesEarnedPerDollar));
+        const tr = document.createElement('tr');
+        tr.dataset.hotelIndex = i;
+        tr.dataset.bucket = bucket.key;
+        tr.innerHTML = `
+            <td>${h.hotel ? `<a href="${googleMapsUrl(h.hotel)}" target="_blank" rel="noopener noreferrer">${h.hotel}</a>` : ''}</td>
+            <td data-order="${h.stars ?? -1}">${h.stars ?? ''}</td>
+            <td>${h.city || ''}</td>
+            <td>${h.area || ''}</td>
+            <td>${h.pricePerNight ? '$' + h.pricePerNight : ''}</td>
+            <td>${h.priceUsd ? '$' + h.priceUsd : ''}</td>
+            <td>${h.milesEarned?.toLocaleString() ?? ''}</td>
+            <td>${h.milesEarnedPerDollar ?? ''}</td>
+            <td data-order="${h.milesEarnedPerDollar ?? -1}"><div class="bucket-cell"><span class="swatch" style="background:${bucket.color}"></span><span>${bucket.label}</span></div></td>
+            <td>${h.gps || ''}</td>`;
+        tableBody.appendChild(tr);
+    });
+
+    dataTable = $('#hotelTable').DataTable({
+        dom: 'rt<"bottom-controls"lip>',
+        fixedHeader: true,
+        pageLength: 50,
+        order: [[7, 'desc']],
+        columnDefs: [
+            { targets: 7, type: 'num' },
+            { targets: 1, type: 'num' },
+            // How it sorts, but search the bucket cell on its text, not its markup.
+            { targets: 8, type: 'num', render: (d, type) => type === 'filter' ? stripHtml(d) : d }
+        ],
+        initComplete: function () { buildFilterBar(this.api()); syncFilterBarWidths(); },
+        drawCallback: function () { syncFilterBarWidths(); syncMarkers(this.api()); }
+    });
+}
+
+// One Select2 multiselect per column, in a bar above the single-row header so
+// the table keeps native sorting/width behaviour.
+function buildFilterBar(api) {
+    filterBar.innerHTML = '';
+    api.columns().every(function () {
+        const column = this;
+        const cell = document.createElement('div');
+        cell.className = 'filter-cell';
+        filterBar.appendChild(cell);
+        const select = $('<select class="column-filter" multiple="multiple"></select>').appendTo(cell);
+
+        select.on('change', function () {
+            const selected = select.val() || [];
+
+            // The bucket column is the table twin of the map legend: both edit
+            // the same selectedBuckets set, so the two controls always agree.
+            if (column.index() === 8) {
+                if (syncingBucketFilter) return;
+                return setSelectedBuckets(selected.length ? selected : RATE_BUCKETS.map(b => b.key));
+            }
+
+            if (!selected.length) return column.search('').draw();
+            const regex = selected.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+            // Anchored so "New York" does not match "New York City"; regex + OR.
+            column.search('^(' + regex + ')$', true, false).draw();
+        });
+
+        // Options for the bucket column are keyed by bucket, not by label, so
+        // they can be read/written with the same values the legend uses.
+        if (column.index() === 8) {
+            RATE_BUCKETS.forEach(b => select.append($('<option>').val(b.key).text(b.label)));
+        } else {
+            const values = [];
+            column.data().unique().each(function (d) {
+                const text = stripHtml(d);   // strip markup from <a> cells
+                if (text.trim()) values.push(text);
+            });
+            values.sort(compareFilterValues(api, column.index()));
+            values.forEach(v => select.append($('<option>').val(v).text(v)));
+        }
+
+        select.select2({ placeholder: 'Filter...', width: '100%', closeOnSelect: false });
+
+        if (column.index() === 8) {
+            bucketFilterSelect = select;
+            // Open the table with the same buckets the legend has checked.
+            syncingBucketFilter = true;
+            select.val(selectedBuckets.size === RATE_BUCKETS.length ? [] : Array.from(selectedBuckets)).trigger('change');
+            syncingBucketFilter = false;
+        }
+    });
+}
+
+// Sort filter options by the column's data type: numeric columns ("$1,024",
+// "1,400") sort numerically; text columns use a natural, case-insensitive sort.
+function compareFilterValues(api, colIndex) {
+    const type = api.settings()[0].aoColumns[colIndex].sType || '';
+    if (/num/.test(type)) {
+        const toNumber = v => {
+            const n = parseFloat(String(v).replace(/[^0-9.-]/g, ''));
+            return Number.isFinite(n) ? n : Number.NEGATIVE_INFINITY;
+        };
+        return (a, b) => toNumber(a) - toNumber(b);
+    }
+    return (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+// Copy column widths onto the filter cells (0 while the tab is hidden -> retry later).
+function syncFilterBarWidths() {
+    const headers = document.querySelectorAll('#hotelTable thead th');
+    const cells = filterBar.children;
+    if (!headers.length || headers.length !== cells.length) return;
+    const widths = Array.from(headers, th => th.getBoundingClientRect().width);
+    if (widths.includes(0)) return;
+    Array.from(cells).forEach((cell, i) => { cell.style.width = widths[i] + 'px'; });
+}
+
+window.addEventListener('resize', () => { if (dataTable) syncFilterBarWidths(); });
+
+// ---------------------------------------------------------------
+// Map
+// ---------------------------------------------------------------
+function buildMap(hotels) {
+    map = L.map('map').setView([39.8283, -98.5795], 5);
+    L.maplibreGL({ style: 'https://tiles.openfreemap.org/styles/positron' }).addTo(map);
+    markerLayerGroup = L.layerGroup().addTo(map);
+    markersByIndex = new Map();
+
+    hotels.forEach((h, i) => {
+        const coords = parseGps(h.gps);
+        if (!coords) return;
+        const marker = L.circleMarker([coords.lat, coords.lng], {
+            radius: 8,
+            fillColor: getBucketMeta(bucketForRate(h.milesEarnedPerDollar)).color,
+            color: '#333', weight: 1, opacity: 1, fillOpacity: 0.9
+        }).bindTooltip(tooltipHtml(h), { direction: 'top', offset: [0, -10], opacity: 1, className: 'custom-tooltip' });
+        markersByIndex.set(i, { marker, latlng: [coords.lat, coords.lng] });
+    });
+
+    selectedBuckets.clear();
+    DEFAULT_BUCKET_KEYS.forEach(k => selectedBuckets.add(k));
+    buildLegendControl();
+    lastVisibleKey = '';
+    fitPending = false;
+    syncMarkers();
+}
+
+function buildLegendControl() {
+    if (legendControl) { map.removeControl(legendControl); legendControl = null; }
+    legendControl = L.control({ position: 'topleft' });
+    legendControl.onAdd = function () {
+        const div = L.DomUtil.create('div', 'legend');
+        div.innerHTML = '<div class="legend-title">Miles per $</div>';
+        RATE_BUCKETS.forEach(b => {
+            const label = document.createElement('label');
+            label.className = 'legend-item';
+            label.innerHTML = `<input type="checkbox" data-bucket="${b.key}"${selectedBuckets.has(b.key) ? ' checked' : ''}>` +
+                `<span class="legend-swatch" style="background:${b.color}"></span><span>${b.label}</span>`;
+            div.appendChild(label);
+        });
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.disableScrollPropagation(div);
+        div.addEventListener('change', () => applyBuckets(div));
+        return div;
+    };
+    legendControl.addTo(map);
+}
+
+function applyBuckets(div) {
+    const keys = Array.from(div.querySelectorAll('input:checked'), cb => cb.dataset.bucket);
+    setSelectedBuckets(keys);
+}
+
+// Single source of truth for the rate-bucket filter. The legend and the table's
+// "Miles / $ Bucket" filter are two editors of the same state, so changing one
+// updates the other (and redrawing the table syncs the markers).
+function setSelectedBuckets(keys) {
+    selectedBuckets.clear();
+    keys.forEach(k => selectedBuckets.add(k));
+
+    document.querySelectorAll('.legend input[data-bucket]').forEach(cb => {
+        cb.checked = selectedBuckets.has(cb.dataset.bucket);
+    });
+
+    if (bucketFilterSelect) {
+        // "All buckets" is the same as no bucket filter, so leave the column
+        // filter empty in that case rather than showing four redundant pills.
+        const all = selectedBuckets.size === RATE_BUCKETS.length;
+        syncingBucketFilter = true;
+        bucketFilterSelect.val(all ? [] : Array.from(selectedBuckets)).trigger('change');
+        syncingBucketFilter = false;
+    }
+
+    if (dataTable) dataTable.draw(false);   // drawCallback also syncs markers
+    else syncMarkers();
+}
+
+// Hide markers that are filtered out of the table (and fit the survivors).
+function syncMarkers(api) {
+    if (!map || !markerLayerGroup) return;
+    api = api || dataTable;
+    let indices;
+
+    if (api) {
+        indices = api.rows({ search: 'applied' }).nodes().toArray()
+            .map(tr => Number(tr.dataset.hotelIndex))
+            .filter(i => markersByIndex.has(i));
+    } else {
+        indices = Array.from(markersByIndex.keys())
+            .filter(i => selectedBuckets.has(bucketForRate(jsonDataGlobal[i]?.milesEarnedPerDollar)));
+    }
+    indices.sort((a, b) => a - b);
+
+    // Sorting/paging changes nothing here, so only touch the map when the set changed.
+    const key = indices.join(',');
+    if (key === lastVisibleKey) return;
+    lastVisibleKey = key;
+
+    markerLayerGroup.clearLayers();
+    visiblePoints = [];
+    indices.forEach(i => {
+        const m = markersByIndex.get(i);
+        markerLayerGroup.addLayer(m.marker);
+        visiblePoints.push(m.latlng);
+    });
+
+    if (map.getContainer().offsetWidth) fitBoundsToPoints(visiblePoints);
+    else fitPending = true;   // fit once the map tab is shown again
+}
+
+function fitBoundsToPoints(points) {
+    if (!points.length) return;
+    if (points.length === 1) return map.setView(points[0], 10);
+    map.fitBounds(points, { padding: [40, 40] });
+}
+</script>
+</body>
+
+</html>
