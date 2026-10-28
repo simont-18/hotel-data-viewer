@@ -274,6 +274,17 @@
             padding: 0 6px;
         }
 
+        .range-notice {
+            background: #fff8e1;
+            border: 1px solid #f0c36d;
+            border-radius: 4px;
+            color: #7a5b00;
+            font-size: 13px;
+            line-height: 1.5;
+            margin: 0 0 10px;
+            padding: 8px 12px;
+        }
+
         .select2-container {
             width: 100% !important;
             font-size: 12px;
@@ -388,6 +399,7 @@
             </div>
             <div id="tab-data" class="tab-pane">
                 <div id="tableContainer">
+                    <div id="rangeNotice" class="range-notice" hidden></div>
                     <div id="filterBar" class="filter-bar"></div>
                     <table id="hotelTable" class="display" style="width:100%">
                         <thead>
@@ -402,6 +414,7 @@
                                 <th>Miles / $</th>
                                 <th>Miles / $ Bucket</th>
                                 <th>GPS</th>
+                                <th>Date Range</th>
                             </tr>
                         </thead>
                         <tbody id="tableBody"></tbody>
@@ -449,6 +462,7 @@
 
         const welcomeScreen = $id('welcomeScreen'), appContainer = $id('appContainer'), fileInput = $id('jsonFile');
         const dropZone = $id('dropZone'), resetBtn = $id('resetBtn'), tableBody = $id('tableBody'), filterBar = $id('filterBar');
+        const rangeNotice = $id('rangeNotice');
         const tabBtns = document.querySelectorAll('.tab-btn');
         const tabPanes = document.querySelectorAll('.tab-pane');
 
@@ -476,13 +490,37 @@
             return { lat, lng };
         }
 
+        // Format an ISO date pair for display. Parsed by hand, never through
+        // `new Date('YYYY-MM-DD')`, which reads as UTC midnight and renders as
+        // the previous day in western time zones.
+        const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+        function formatDateRange(h) {
+            const parts = d => {
+                const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || '');
+                return m ? m.slice(1).map(Number) : null;
+            };
+            const a = parts(h.checkIn), b = parts(h.checkOut);
+            if (!a || !b) return h.checkIn || h.checkOut || '';
+            const short = p => `${MONTHS[p[1] - 1]} ${p[2]}`;
+            return a[0] === b[0]
+                ? `${short(a)} – ${short(b)}, ${a[0]}`
+                : `${short(a)}, ${a[0]} – ${short(b)}, ${b[0]}`;
+        }
+
         function tooltipHtml(h) {
             const link = h.hotel ? `<a href="${googleMapsUrl(h.hotel)}" target="_blank" rel="noopener noreferrer">${h.hotel}</a>` : 'Unknown Hotel';
             const row = (label, value) => `<div class="row"><span class="label">${label}</span><span class="value">${value}</span></div>`;
+            const range = formatDateRange(h);
             return `<div class="hotel-tooltip"><h4>${link}</h4>` +
-                row('City', h.city || 'N/A') + row('Area', h.area || 'N/A') +
-                row('Price / night', '$' + (h.pricePerNight ?? 'N/A')) + row('Total price', '$' + (h.priceUsd ?? 'N/A')) +
-                row('Miles earned', h.milesEarned?.toLocaleString() ?? 'N/A') + row('Miles / $', h.milesEarnedPerDollar ?? 'N/A') +
+                row('City', h.city || 'N/A') +
+                row('Stars', h.stars || '') +
+                row('Area', h.area || 'N/A') +
+                row('Price / night', '$' + (h.pricePerNight ?? 'N/A')) +
+                row('Total price', '$' + (h.priceUsd ?? 'N/A')) +
+                row('Miles earned', h.milesEarned?.toLocaleString() ?? 'N/A') +
+                row('Miles / $', h.milesEarnedPerDollar ?? 'N/A') +
+                (range ? row('Date range', range) : '') +
                 '</div>';
         }
 
@@ -502,9 +540,12 @@
             reader.onload = e => {
                 try {
                     const json = JSON.parse(e.target.result);
-                    if (!Array.isArray(json)) return alert('Error: The JSON file must contain an array of objects.');
-                    jsonDataGlobal = json;
-                    initializeApp(json);
+                    const rows = json && Array.isArray(json.results) ? json.results : null;
+                    if (!rows) {
+                        return alert('Error: this is not a hotel-results file (expected an object with a "results" array). Re-run the search to regenerate pre-envelope files.');
+                    }
+                    jsonDataGlobal = rows;
+                    initializeApp(rows);
                 } catch (err) {
                     console.error(err);
                     alert('Error parsing JSON file. Please ensure it is valid JSON.');
@@ -515,6 +556,7 @@
 
         function initializeApp(data) {
             welcomeScreen.style.opacity = '0';
+            updateRangeNotice(data);
             setTimeout(() => {
                 welcomeScreen.style.display = 'none';
                 appContainer.style.display = 'flex';
@@ -528,6 +570,8 @@
             if (dataTable) { dataTable.destroy(); dataTable = null; }
             $('#filterBar .column-filter').select2('destroy');
             filterBar.innerHTML = '';
+            rangeNotice.hidden = true;
+            rangeNotice.textContent = '';
             tableBody.innerHTML = '';
             markersByIndex = new Map();
             visiblePoints = [];
@@ -560,8 +604,13 @@
             tabPanes.forEach(p => p.classList.toggle('active', p.id === btn.dataset.target));
             if (btn.dataset.target === 'tab-map') {
                 if (!map) return setTimeout(() => buildMap(jsonDataGlobal), 25);
-                map.invalidateSize();
-                if (fitPending) { fitPending = false; fitBoundsToPoints(visiblePoints); }
+                // Let the newly shown pane lay out first: invalidateSize on a still
+                // hidden pane caches a 0x0 size and breaks the following fit.
+                requestAnimationFrame(() => {
+                    if (!map) return;
+                    map.invalidateSize();
+                    if (fitPending) { fitPending = false; fitBoundsToPoints(visiblePoints); }
+                });
             } else if (dataTable) {
                 // The table is built while hidden, so re-measure once it is visible.
                 requestAnimationFrame(() => { dataTable.columns.adjust(); syncFilterBarWidths(); });
@@ -588,7 +637,8 @@
             <td>${h.milesEarned?.toLocaleString() ?? ''}</td>
             <td>${h.milesEarnedPerDollar ?? ''}</td>
             <td data-order="${h.milesEarnedPerDollar ?? -1}"><div class="bucket-cell"><span class="swatch" style="background:${bucket.color}"></span><span>${bucket.label}</span></div></td>
-            <td>${h.gps || ''}</td>`;
+            <td>${h.gps || ''}</td>
+            <td data-order="${h.checkIn || ''}">${formatDateRange(h)}</td>`;
                 tableBody.appendChild(tr);
             });
 
@@ -600,12 +650,26 @@
                 columnDefs: [
                     { targets: 7, type: 'num' },
                     { targets: 1, type: 'num' },
+                    // ISO data-order makes a formatted range sort chronologically.
+                    { targets: 10, type: 'string' },
                     // How it sorts, but search the bucket cell on its text, not its markup.
                     { targets: 8, type: 'num', render: (d, type) => type === 'filter' ? stripHtml(d) : d }
                 ],
                 initComplete: function () { buildFilterBar(this.api()); syncFilterBarWidths(); },
                 drawCallback: function () { syncFilterBarWidths(); syncMarkers(this.api()); }
             });
+        }
+
+        // A file that mixes date ranges can only show one range per hotel (combine
+        // keeps the newest row), so say so rather than letting the column look absolute.
+        function updateRangeNotice(rows) {
+            const ranges = new Set(
+                rows.map(h => `${h.checkIn || ''}|${h.checkOut || ''}`).filter(k => k !== '|')
+            );
+            rangeNotice.hidden = ranges.size <= 1;
+            rangeNotice.textContent = ranges.size > 1
+                ? `This file mixes ${ranges.size} date ranges. If a hotel was searched more than once, only its newest dates are shown. Pick one date range to compare hotels fairly.`
+                : '';
         }
 
         // One Select2 multiselect per column, in a bar above the single-row header so
@@ -794,14 +858,36 @@
                 visiblePoints.push(m.latlng);
             });
 
-            if (map.getContainer().offsetWidth) fitBoundsToPoints(visiblePoints);
-            else fitPending = true;   // fit once the map tab is shown again
+            fitPending = false;
+            fitBoundsToPoints(visiblePoints);   // defers itself while the pane is hidden
         }
 
         function fitBoundsToPoints(points) {
-            if (!points.length) return;
-            if (points.length === 1) return map.setView(points[0], 10);
-            map.fitBounds(points, { padding: [40, 40] });
+            if (!map) return;
+            const valid = (points || []).filter(p =>
+                Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]));
+            if (!valid.length) return;
+
+            // A hidden pane (or one whose layout has not been flushed yet) measures
+            // 0x0; fitting then divides by a zero size and poisons the map with a
+            // NaN zoom, which Leaflet later reports as "Invalid LatLng object".
+            const size = map.getSize();
+            if (!size.x || !size.y) { fitPending = true; return; }
+
+            const bounds = L.latLngBounds(valid);
+            if (!bounds.isValid()) return;
+
+            // Filtering down to hotels that share one coordinate gives bounds with
+            // zero area, so fitBounds divides by zero width/height as well. Centre
+            // on the shared point instead.
+            const zeroArea = bounds.getSouth() === bounds.getNorth() && bounds.getWest() === bounds.getEast();
+            if (valid.length === 1 || zeroArea) return map.setView(bounds.getCenter(), 10);
+
+            try {
+                map.fitBounds(bounds, { padding: [40, 40] });
+            } catch (err) {
+                console.warn('Could not fit the map to the filtered results.', err);
+            }
         }
     </script>
 </body>
