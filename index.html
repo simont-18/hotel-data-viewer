@@ -198,6 +198,67 @@
             flex: 0 0 auto;
         }
 
+        /* Filters applied readout, bottom right of the map */
+        .filters-applied {
+            background: white;
+            padding: 10px 12px;
+            border-radius: 6px;
+            box-shadow: 0 1px 6px rgba(0, 0, 0, 0.3);
+            font-size: 12px;
+            line-height: 1.5;
+            max-width: 320px;
+            max-height: 40vh;
+            overflow: auto;
+            box-sizing: border-box;
+        }
+
+        .filters-applied-title {
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .filters-applied ul {
+            margin: 0;
+            padding-left: 16px;
+        }
+
+        .filters-applied li {
+            margin: 2px 0;
+            overflow-wrap: anywhere;
+        }
+
+        .filters-applied .filter-label {
+            font-weight: 600;
+        }
+
+        .filters-applied .filter-bucket {
+            white-space: nowrap;
+        }
+
+        .filters-applied .filter-bucket-swatch {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            border: 1px solid rgba(0, 0, 0, 0.3);
+            margin-right: 4px;
+            vertical-align: -1px;
+        }
+
+        .filters-applied .filter-bucket-list {
+            list-style: none;
+            margin: 2px 0 0;
+            padding-left: 14px;
+        }
+
+        .filters-applied .filter-bucket-list li {
+            margin: 1px 0;
+        }
+
+        .filters-applied-empty {
+            color: #777;
+        }
+
         .leaflet-tooltip.custom-tooltip {
             max-width: 280px !important;
             white-space: normal !important;
@@ -446,6 +507,17 @@
         const DEFAULT_BUCKET_KEYS = ['10-15', '15+'];
         const selectedBuckets = new Set(DEFAULT_BUCKET_KEYS);
 
+        // The map's "Filters Applied" readout only mirrors a subset of the table
+        // filters. Long selection lists collapse to a count so the panel stays small.
+        const FILTER_PANEL_COLUMNS = [
+            { index: 0, label: 'Hotels', collapseAfter: 3 },
+            { index: 1, label: 'Stars' },
+            { index: 2, label: 'City', collapseAfter: 3 },
+            { index: 3, label: 'Area', collapseAfter: 3 },
+            { index: 10, label: 'Date range', collapseAfter: 3 },
+            { index: 8, label: 'Miles / $ Bucket', bucket: true }
+        ];
+
         let map, markerLayerGroup, legendControl, dataTable;
         let bucketFilterSelect = null;   // Select2 for the table's "Miles / $ Bucket" column
         let syncingBucketFilter = false;
@@ -454,10 +526,16 @@
         let visiblePoints = [];
         let lastVisibleKey = '';
         let fitPending = false;
+        let filterPanelControl = null;    // Leaflet control showing applied filters
+        let lastFiltersAppliedHtml = '';
+        const columnFilterSelects = new Map();   // column index -> Select2 <select>
 
         const bucketForRate = rate => (RATE_BUCKETS.find(b => b.test(Number(rate))) || RATE_BUCKETS[0]).key;
         const getBucketMeta = key => RATE_BUCKETS.find(b => b.key === key) || RATE_BUCKETS[0];
         const stripHtml = d => $('<div>').html(d ?? '').text();
+        const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, c => (
+            { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+        ));
         const $id = id => document.getElementById(id);
 
         const welcomeScreen = $id('welcomeScreen'), appContainer = $id('appContainer'), fileInput = $id('jsonFile');
@@ -567,6 +645,9 @@
 
         function clearAppState() {
             if (map) { map.remove(); map = null; markerLayerGroup = null; legendControl = null; }
+            filterPanelControl = null;
+            lastFiltersAppliedHtml = '';
+            columnFilterSelects.clear();
             if (dataTable) { dataTable.destroy(); dataTable = null; }
             $('#filterBar .column-filter').select2('destroy');
             filterBar.innerHTML = '';
@@ -656,8 +737,9 @@
                     { targets: 8, type: 'num', render: (d, type) => type === 'filter' ? stripHtml(d) : d }
                 ],
                 initComplete: function () { buildFilterBar(this.api()); syncFilterBarWidths(); },
-                drawCallback: function () { syncFilterBarWidths(); syncMarkers(this.api()); }
+                drawCallback: function () { syncFilterBarWidths(); syncMarkers(this.api()); updateFiltersApplied(); }
             });
+            updateFiltersApplied();
         }
 
         // A file that mixes date ranges can only show one range per hotel (combine
@@ -676,6 +758,7 @@
         // the table keeps native sorting/width behaviour.
         function buildFilterBar(api) {
             filterBar.innerHTML = '';
+            columnFilterSelects.clear();
             api.columns().every(function () {
                 const column = this;
                 const cell = document.createElement('div');
@@ -721,8 +804,13 @@
                     syncingBucketFilter = true;
                     select.val(selectedBuckets.size === RATE_BUCKETS.length ? [] : Array.from(selectedBuckets)).trigger('change');
                     syncingBucketFilter = false;
+                } else {
+                    // The map readout reads directly from these selects, which is the
+                    // same state DataTables searches on.
+                    columnFilterSelects.set(column.index(), select);
                 }
             });
+            updateFiltersApplied();
         }
 
         // Sort filter options by the column's data type: numeric columns ("$1,024",
@@ -774,6 +862,7 @@
             selectedBuckets.clear();
             DEFAULT_BUCKET_KEYS.forEach(k => selectedBuckets.add(k));
             buildLegendControl();
+            buildFiltersAppliedControl();
             lastVisibleKey = '';
             fitPending = false;
             syncMarkers();
@@ -798,6 +887,86 @@
                 return div;
             };
             legendControl.addTo(map);
+        }
+
+        // Bottom-right readout of the filters currently applied to the table (which
+        // is what the markers mirror). Only the filters named here are listed; the
+        // price, miles and GPS columns are intentionally omitted.
+        function buildFiltersAppliedControl() {
+            if (filterPanelControl) { map.removeControl(filterPanelControl); filterPanelControl = null; }
+            filterPanelControl = L.control({ position: 'bottomright' });
+            filterPanelControl.onAdd = function () {
+                const div = L.DomUtil.create('div', 'filters-applied');
+                L.DomEvent.disableClickPropagation(div);
+                L.DomEvent.disableScrollPropagation(div);
+                return div;
+            };
+            filterPanelControl.addTo(map);
+
+            // Attribution also sits bottom-right; keep it at the very bottom and the
+            // filter panel directly above it.
+            const corner = map.getContainer().querySelector('.leaflet-bottom.leaflet-right');
+            const attribution = corner && corner.querySelector('.leaflet-control-attribution');
+            const panel = filterPanelControl.getContainer();
+            if (corner && attribution && panel) corner.insertBefore(panel, attribution);
+
+            lastFiltersAppliedHtml = '';
+            updateFiltersApplied();
+        }
+
+        // Build the rows from the same state the table filters on: each column's
+        // Select2 values plus the shared bucket set.
+        function appliedFilterRows() {
+            const rows = [];
+            FILTER_PANEL_COLUMNS.forEach(def => {
+                if (def.bucket) {
+                    // All buckets checked means no bucket filter at all.
+                    if (selectedBuckets.size === RATE_BUCKETS.length) return;
+                    rows.push({
+                        label: def.label,
+                        subItems: RATE_BUCKETS.filter(b => selectedBuckets.has(b.key))
+                    });
+                    return;
+                }
+
+                const select = columnFilterSelects.get(def.index);
+                const values = select ? (select.val() || []) : [];
+                if (!values.length) return;
+                const text = def.collapseAfter && values.length > def.collapseAfter
+                    ? `${values.length} selected`
+                    : values.join(', ');
+                rows.push({ label: def.label, text });
+            });
+            return rows;
+        }
+
+        function renderAppliedFilterRow(row) {
+            if (!row.subItems) {
+                return `<li><span class="filter-label">${escapeHtml(row.label)}:</span> ${escapeHtml(row.text)}</li>`;
+            }
+
+            const items = row.subItems.length
+                ? '<ul class="filter-bucket-list">' + row.subItems.map(b =>
+                    `<li><span class="filter-bucket"><span class="filter-bucket-swatch" style="background:${b.color}"></span>${escapeHtml(b.label)}</span></li>`
+                ).join('') + '</ul>'
+                : ' <span class="filters-applied-empty">None selected</span>';
+            return `<li><span class="filter-label">${escapeHtml(row.label)}:</span>${items}</li>`;
+        }
+
+        function updateFiltersApplied() {
+            if (!filterPanelControl) return;
+            const container = filterPanelControl.getContainer();
+            if (!container) return;
+
+            const rows = appliedFilterRows();
+            const html = '<div class="filters-applied-title">Filters Applied:</div>' +
+                (rows.length
+                    ? '<ul>' + rows.map(renderAppliedFilterRow).join('') + '</ul>'
+                    : '<div class="filters-applied-empty">None</div>');
+
+            if (html === lastFiltersAppliedHtml) return;
+            lastFiltersAppliedHtml = html;
+            container.innerHTML = html;
         }
 
         function applyBuckets(div) {
@@ -825,8 +994,8 @@
                 syncingBucketFilter = false;
             }
 
-            if (dataTable) dataTable.draw(false);   // drawCallback also syncs markers
-            else syncMarkers();
+            if (dataTable) dataTable.draw(false);   // drawCallback also syncs markers and the panel
+            else { syncMarkers(); updateFiltersApplied(); }
         }
 
         // Hide markers that are filtered out of the table (and fit the survivors).
