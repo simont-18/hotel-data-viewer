@@ -335,17 +335,6 @@
             padding: 0 6px;
         }
 
-        .range-notice {
-            background: #fff8e1;
-            border: 1px solid #f0c36d;
-            border-radius: 4px;
-            color: #7a5b00;
-            font-size: 13px;
-            line-height: 1.5;
-            margin: 0 0 10px;
-            padding: 8px 12px;
-        }
-
         .select2-container {
             width: 100% !important;
             font-size: 12px;
@@ -433,6 +422,22 @@
             border: 1px solid rgba(0, 0, 0, 0.3);
             flex: 0 0 auto;
         }
+
+        /* Collapsed state for a grouped hotel: larger than a normal marker, with the
+           number of visible entries centred inside. */
+        .hotel-stack-indicator {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
+            border-radius: 50%;
+            border: 2px solid rgba(255, 255, 255, 0.9);
+            background: #006680;
+            color: #fff;
+            font: 700 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+            cursor: pointer;
+        }
     </style>
 </head>
 
@@ -460,7 +465,6 @@
             </div>
             <div id="tab-data" class="tab-pane">
                 <div id="tableContainer">
-                    <div id="rangeNotice" class="range-notice" hidden></div>
                     <div id="filterBar" class="filter-bar"></div>
                     <table id="hotelTable" class="display" style="width:100%">
                         <thead>
@@ -474,7 +478,6 @@
                                 <th>Miles Earned</th>
                                 <th>Miles / $</th>
                                 <th>Miles / $ Bucket</th>
-                                <th>GPS</th>
                                 <th>Date Range</th>
                             </tr>
                         </thead>
@@ -507,6 +510,14 @@
         const DEFAULT_BUCKET_KEYS = ['10-15', '15+'];
         const selectedBuckets = new Set(DEFAULT_BUCKET_KEYS);
 
+        // Multi-range layout, in pixels: entries keep the same circleMarker size as
+        // every other hotel, so the pitch must clear a 16px dot. Offsets are applied
+        // around the hotel's coordinate and recomputed when the zoom changes.
+        const STACK_MAX_PER_COLUMN = 4;
+        const STACK_PITCH = 20;              // px between dot centres (16px dot + 4px gap)
+        const STACK_INDICATOR_SIZE = 30;     // collapsed marker, larger than a normal dot
+        const STACK_EXPAND_ZOOM = 17;        // z >= this: spaced individual dots, no indicator
+
         // The map's "Filters Applied" readout only mirrors a subset of the table
         // filters. Long selection lists collapse to a count so the panel stays small.
         const FILTER_PANEL_COLUMNS = [
@@ -514,7 +525,7 @@
             { index: 1, label: 'Stars' },
             { index: 2, label: 'City', collapseAfter: 3 },
             { index: 3, label: 'Area', collapseAfter: 3 },
-            { index: 10, label: 'Date range', collapseAfter: 3 },
+            { index: 9, label: 'Date range', collapseAfter: 3 },
             { index: 8, label: 'Miles / $ Bucket', bucket: true }
         ];
 
@@ -523,6 +534,10 @@
         let syncingBucketFilter = false;
         let jsonDataGlobal = [];
         let markersByIndex = new Map();   // hotel index -> { marker, latlng }
+        let hotelGroups = new Map();      // hotel key -> [{ i, lat, lng }]
+        let stackMarkers = new Map();     // hotel key -> { latlng, indicator }
+        let lastVisibleIndices = [];      // indices from the last draw, for re-render on zoom
+        let suppressFit = false;          // set while the bucket filter redraws: keep the view
         let visiblePoints = [];
         let lastVisibleKey = '';
         let fitPending = false;
@@ -540,7 +555,6 @@
 
         const welcomeScreen = $id('welcomeScreen'), appContainer = $id('appContainer'), fileInput = $id('jsonFile');
         const dropZone = $id('dropZone'), resetBtn = $id('resetBtn'), tableBody = $id('tableBody'), filterBar = $id('filterBar');
-        const rangeNotice = $id('rangeNotice');
         const tabBtns = document.querySelectorAll('.tab-btn');
         const tabPanes = document.querySelectorAll('.tab-pane');
 
@@ -567,6 +581,16 @@
             if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
             return { lat, lng };
         }
+
+        // Hotel identity for map grouping: combine's normalization (trim, collapse
+        // whitespace, lowercase) without the GPS component, so a hotel that was
+        // re-geocoded between runs still stacks.
+        const keyPart = v => String(v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+        const hotelKey = h => keyPart(h?.city) + '\u0000' + keyPart(h?.hotel);
+        const rangeKey = h => `${h?.checkIn || ''}|${h?.checkOut || ''}`;
+        // An unnamed hotel must never group: every "Unknown Hotel" card in a city
+        // would otherwise merge into one stack.
+        const stackKey = h => (keyPart(h?.hotel) ? hotelKey(h) : null);
 
         // Format an ISO date pair for display. Parsed by hand, never through
         // `new Date('YYYY-MM-DD')`, which reads as UTC midnight and renders as
@@ -634,7 +658,6 @@
 
         function initializeApp(data) {
             welcomeScreen.style.opacity = '0';
-            updateRangeNotice(data);
             setTimeout(() => {
                 welcomeScreen.style.display = 'none';
                 appContainer.style.display = 'flex';
@@ -651,10 +674,11 @@
             if (dataTable) { dataTable.destroy(); dataTable = null; }
             $('#filterBar .column-filter').select2('destroy');
             filterBar.innerHTML = '';
-            rangeNotice.hidden = true;
-            rangeNotice.textContent = '';
             tableBody.innerHTML = '';
             markersByIndex = new Map();
+            hotelGroups = new Map();
+            stackMarkers = new Map();
+            lastVisibleIndices = [];
             visiblePoints = [];
             lastVisibleKey = '';
             fitPending = false;
@@ -708,8 +732,10 @@
                 const tr = document.createElement('tr');
                 tr.dataset.hotelIndex = i;
                 tr.dataset.bucket = bucket.key;
+                // The GPS column is gone; keep the coordinates one hover away on the hotel cell.
+                const gpsTitle = h.gps ? ` title="GPS: ${escapeHtml(h.gps)}"` : '';
                 tr.innerHTML = `
-            <td>${h.hotel ? `<a href="${googleMapsUrl(h.hotel)}" target="_blank" rel="noopener noreferrer">${h.hotel}</a>` : ''}</td>
+            <td${gpsTitle}>${h.hotel ? `<a href="${googleMapsUrl(h.hotel)}" target="_blank" rel="noopener noreferrer">${h.hotel}</a>` : ''}</td>
             <td data-order="${h.stars ?? -1}">${h.stars ?? ''}</td>
             <td>${h.city || ''}</td>
             <td>${h.area || ''}</td>
@@ -718,7 +744,6 @@
             <td>${h.milesEarned?.toLocaleString() ?? ''}</td>
             <td>${h.milesEarnedPerDollar ?? ''}</td>
             <td data-order="${h.milesEarnedPerDollar ?? -1}"><div class="bucket-cell"><span class="swatch" style="background:${bucket.color}"></span><span>${bucket.label}</span></div></td>
-            <td>${h.gps || ''}</td>
             <td data-order="${h.checkIn || ''}">${formatDateRange(h)}</td>`;
                 tableBody.appendChild(tr);
             });
@@ -732,7 +757,7 @@
                     { targets: 7, type: 'num' },
                     { targets: 1, type: 'num' },
                     // ISO data-order makes a formatted range sort chronologically.
-                    { targets: 10, type: 'string' },
+                    { targets: 9, type: 'string' },
                     // How it sorts, but search the bucket cell on its text, not its markup.
                     { targets: 8, type: 'num', render: (d, type) => type === 'filter' ? stripHtml(d) : d }
                 ],
@@ -740,18 +765,6 @@
                 drawCallback: function () { syncFilterBarWidths(); syncMarkers(this.api()); updateFiltersApplied(); }
             });
             updateFiltersApplied();
-        }
-
-        // A file that mixes date ranges can only show one range per hotel (combine
-        // keeps the newest row), so say so rather than letting the column look absolute.
-        function updateRangeNotice(rows) {
-            const ranges = new Set(
-                rows.map(h => `${h.checkIn || ''}|${h.checkOut || ''}`).filter(k => k !== '|')
-            );
-            rangeNotice.hidden = ranges.size <= 1;
-            rangeNotice.textContent = ranges.size > 1
-                ? `This file mixes ${ranges.size} date ranges. If a hotel was searched more than once, only its newest dates are shown. Pick one date range to compare hotels fairly.`
-                : '';
         }
 
         // One Select2 multiselect per column, in a bar above the single-row header so
@@ -839,12 +852,90 @@
 
         window.addEventListener('resize', () => { if (dataTable) syncFilterBarWidths(); });
 
+        // A hotel with several date ranges keeps one regular circleMarker per entry:
+        // same size, same tooltip, same bucket colour. From STACK_EXPAND_ZOOM the
+        // entries are arranged around the hotel's coordinate in a spaced pixel grid.
+        function layoutStack(key, indices) {
+            const stack = stackMarkers.get(key);
+            if (!stack || !map) return;
+
+            // Chronological order; the array index breaks equal check-in dates.
+            const members = indices.slice().sort((a, b) =>
+                String(jsonDataGlobal[a]?.checkIn || '').localeCompare(String(jsonDataGlobal[b]?.checkIn || ''))
+                || a - b);
+
+            const cols = Math.ceil(members.length / STACK_MAX_PER_COLUMN);
+            const rows = Math.min(members.length, STACK_MAX_PER_COLUMN);
+            const base = map.latLngToContainerPoint(stack.latlng);
+            const left = -((cols - 1) * STACK_PITCH) / 2;
+            const top = -((rows - 1) * STACK_PITCH) / 2;
+
+            members.forEach((i, n) => {
+                const col = Math.floor(n / STACK_MAX_PER_COLUMN);
+                const row = n % STACK_MAX_PER_COLUMN;
+                const point = base.add(L.point(left + col * STACK_PITCH, top + row * STACK_PITCH));
+                markersByIndex.get(i).marker.setLatLng(map.containerPointToLatLng(point));
+            });
+        }
+
+        // Collapsed form: one larger dot with the count inside, in place of the entries.
+        function buildStackIndicator(count) {
+            return L.divIcon({
+                className: 'hotel-stack-indicator',
+                html: `${count}`,
+                iconSize: [STACK_INDICATOR_SIZE, STACK_INDICATOR_SIZE],
+                iconAnchor: [STACK_INDICATOR_SIZE / 2, STACK_INDICATOR_SIZE / 2],
+            });
+        }
+
+        // Draw the visible set in the shape the current zoom calls for: one enlarged
+        // count indicator below STACK_EXPAND_ZOOM, spaced individual dots at/above it.
+        function renderMarkers(indices) {
+            if (!map || !markerLayerGroup) return;
+            markerLayerGroup.clearLayers();
+            visiblePoints = [];
+
+            const expanded = map.getZoom() >= STACK_EXPAND_ZOOM;
+
+            const addPlain = i => {
+                const m = markersByIndex.get(i);
+                m.marker.setLatLng(m.latlng);   // undo a previous stack offset
+                markerLayerGroup.addLayer(m.marker);
+                visiblePoints.push(m.latlng);
+            };
+
+            const groups = new Map();
+            indices.forEach(i => {
+                const k = stackKey(jsonDataGlobal[i]);
+                if (!k) { addPlain(i); return; }
+                if (!groups.has(k)) groups.set(k, []);
+                groups.get(k).push(i);
+            });
+
+            groups.forEach((members, k) => {
+                const ranges = new Set(members.map(i => rangeKey(jsonDataGlobal[i])));
+                const stack = stackMarkers.get(k);
+                if (members.length >= 2 && ranges.size >= 2 && stack) {
+                    if (expanded) {
+                        members.forEach(i => markerLayerGroup.addLayer(markersByIndex.get(i).marker));
+                        layoutStack(k, members);
+                    } else {
+                        stack.indicator.setIcon(buildStackIndicator(members.length));
+                        markerLayerGroup.addLayer(stack.indicator);
+                    }
+                    visiblePoints.push(stack.latlng);   // base point only: fit stays true
+                    return;
+                }
+                members.forEach(addPlain);
+            });
+        }
+
         // ---------------------------------------------------------------
         // Map
         // ---------------------------------------------------------------
         function buildMap(hotels) {
             map = L.map('map').setView([39.8283, -98.5795], 5);
-            L.maplibreGL({ style: 'https://tiles.openfreemap.org/styles/positron' }).addTo(map);
+            L.maplibreGL({ style: 'https://tiles.openfreemap.org/styles/liberty' }).addTo(map);
             markerLayerGroup = L.layerGroup().addTo(map);
             markersByIndex = new Map();
 
@@ -858,6 +949,38 @@
                 }).bindTooltip(tooltipHtml(h), { direction: 'top', offset: [0, -10], opacity: 1, className: 'custom-tooltip' });
                 markersByIndex.set(i, { marker, latlng: [coords.lat, coords.lng] });
             });
+
+            // Group the whole file once, so a stack's anchor and indicator never shift
+            // as filters change. Only hotels with several distinct ranges get a stack.
+            hotelGroups = new Map();
+            stackMarkers = new Map();
+            lastVisibleIndices = [];
+
+            hotels.forEach((h, i) => {
+                const k = stackKey(h);
+                const coords = parseGps(h.gps);
+                if (!k || !coords) return;
+                if (!hotelGroups.has(k)) hotelGroups.set(k, []);
+                hotelGroups.get(k).push({ i, lat: coords.lat, lng: coords.lng });
+            });
+
+            hotelGroups.forEach((members, k) => {
+                const ranges = new Set(members.map(m => rangeKey(hotels[m.i])));
+                if (members.length < 2 || ranges.size < 2) return;
+                const lat = members.reduce((sum, m) => sum + m.lat, 0) / members.length;
+                const lng = members.reduce((sum, m) => sum + m.lng, 0) / members.length;
+                const latlng = [lat, lng];
+                // Clicking the collapsed dot zooms in far enough to split the group.
+                const indicator = L.marker(latlng, {
+                    icon: buildStackIndicator(0),
+                    keyboard: false,
+                }).on('click', () => map.setView(latlng, STACK_EXPAND_ZOOM));
+                stackMarkers.set(k, { latlng, indicator });
+            });
+
+            // Crossing STACK_EXPAND_ZOOM changes shape, and offsets are pixels, so a
+            // re-render (never a re-fit) keeps the current view stable.
+            map.on('zoomend', () => renderMarkers(lastVisibleIndices));
 
             selectedBuckets.clear();
             DEFAULT_BUCKET_KEYS.forEach(k => selectedBuckets.add(k));
@@ -994,8 +1117,15 @@
                 syncingBucketFilter = false;
             }
 
-            if (dataTable) dataTable.draw(false);   // drawCallback also syncs markers and the panel
-            else { syncMarkers(); updateFiltersApplied(); }
+            // The bucket filter is the one control that must not move the map: redraw the
+            // table (and therefore the markers) while leaving zoom and centre untouched.
+            suppressFit = true;
+            try {
+                if (dataTable) dataTable.draw(false);   // drawCallback also syncs markers and the panel
+                else { syncMarkers(); updateFiltersApplied(); }
+            } finally {
+                suppressFit = false;
+            }
         }
 
         // Hide markers that are filtered out of the table (and fit the survivors).
@@ -1018,15 +1148,11 @@
             const key = indices.join(',');
             if (key === lastVisibleKey) return;
             lastVisibleKey = key;
+            lastVisibleIndices = indices;
 
-            markerLayerGroup.clearLayers();
-            visiblePoints = [];
-            indices.forEach(i => {
-                const m = markersByIndex.get(i);
-                markerLayerGroup.addLayer(m.marker);
-                visiblePoints.push(m.latlng);
-            });
+            renderMarkers(indices);
 
+            if (suppressFit) return;   // bucket filter: draw only, keep the current view
             fitPending = false;
             fitBoundsToPoints(visiblePoints);   // defers itself while the pane is hidden
         }
