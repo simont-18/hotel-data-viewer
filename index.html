@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <title>Hotel Data Viewer [49edf663]</title>
+    <title>Hotel Data Viewer [e40215ad]</title>
     <link rel="icon" type="image/svg+xml"
         href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect x='5' y='5' width='90' height='90' rx='18' fill='%231a365d'/%3E%3Crect x='22' y='30' width='36' height='52' fill='%234299e1' rx='2'/%3E%3Cg fill='%23bee3f8'%3E%3Crect x='27' y='36' width='6' height='6' rx='1'/%3E%3Crect x='37' y='36' width='6' height='6' rx='1'/%3E%3Crect x='47' y='36' width='6' height='6' rx='1'/%3E%3Crect x='27' y='47' width='6' height='6' rx='1'/%3E%3Crect x='37' y='47' width='6' height='6' rx='1'/%3E%3Crect x='47' y='47' width='6' height='6' rx='1'/%3E%3Crect x='27' y='58' width='6' height='6' rx='1'/%3E%3Crect x='37' y='58' width='6' height='6' rx='1'/%3E%3Crect x='47' y='58' width='6' height='6' rx='1'/%3E%3C/g%3E%3Crect x='35' y='70' width='10' height='12' fill='%232c5282' rx='1'/%3E%3Cg fill='%2348bb78'%3E%3Crect x='64' y='66' width='6' height='16' rx='1'/%3E%3Crect x='72' y='56' width='6' height='26' rx='1'/%3E%3Crect x='80' y='46' width='6' height='36' rx='1'/%3E%3C/g%3E%3Cpath d='M 64 48 L 72 40 L 78 44 L 86 34' stroke='%23f6ad55' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpolygon points='86,34 82,35 85,39' fill='%23f6ad55'/%3E%3Ccircle cx='30' cy='22' r='6' fill='none' stroke='%23f6ad55' stroke-width='2.5'/%3E%3Cline x1='34.5' y1='26.5' x2='38' y2='30' stroke='%23f6ad55' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -198,6 +198,22 @@
             border-radius: 50%;
             border: 1px solid rgba(0, 0, 0, 0.3);
             flex: 0 0 auto;
+        }
+
+        /* Reset-zoom button, appended to Leaflet's +/- bar so it sits under them.
+           The bar supplies the border, divider and corner radii as for any <a>. */
+        .leaflet-bar a.leaflet-control-zoom-reset {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: black;
+        }
+
+        .leaflet-bar a.leaflet-control-zoom-reset svg {
+            width: 15px;
+            height: 15px;
+            display: block;
+            pointer-events: none;
         }
 
         /* Filters applied readout, bottom right of the map */
@@ -519,6 +535,11 @@
         const STACK_PITCH = 20;              // px between dot centres (16px dot + 4px gap)
         const STACK_INDICATOR_SIZE = 30;     // collapsed marker, larger than a normal dot
         const STACK_EXPAND_ZOOM = 17;        // z >= this: spaced individual dots, no indicator
+
+        // Where the map opens before the first fit, and where the reset button goes
+        // when there is nothing to fit.
+        const DEFAULT_CENTER = [39.8283, -98.5795];
+        const DEFAULT_ZOOM = 5;
 
         // The map's "Filters Applied" readout only mirrors a subset of the table
         // filters. Long selection lists collapse to a count so the panel stays small.
@@ -936,7 +957,7 @@
         // Map
         // ---------------------------------------------------------------
         function buildMap(hotels) {
-            map = L.map('map').setView([39.8283, -98.5795], 5);
+            map = L.map('map').setView(DEFAULT_CENTER, DEFAULT_ZOOM);
             L.maplibreGL({ style: 'https://tiles.openfreemap.org/styles/liberty' }).addTo(map);
             markerLayerGroup = L.layerGroup().addTo(map);
             markersByIndex = new Map();
@@ -986,11 +1007,46 @@
 
             selectedBuckets.clear();
             DEFAULT_BUCKET_KEYS.forEach(k => selectedBuckets.add(k));
+            buildZoomResetButton();
             buildLegendControl();
             buildFiltersAppliedControl();
             lastVisibleKey = '';
             fitPending = false;
             syncMarkers();
+        }
+
+        // Material "replay" glyph: a circular arrow, the usual "undo the last view" cue.
+        const ZOOM_RESET_ICON = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">' +
+            '<path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 ' +
+            '3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>';
+
+        // The reset button is injected into Leaflet's own zoom bar instead of being a
+        // separate control: that keeps it directly under the + / − buttons and above
+        // the legend, and inherits the bar's border, divider and rounded corners.
+        function buildZoomResetButton() {
+            if (!map) return;
+            const zoomBar = map.getContainer().querySelector('.leaflet-control-zoom');
+            if (!zoomBar || zoomBar.querySelector('.leaflet-control-zoom-reset')) return;
+
+            const btn = L.DomUtil.create('a', 'leaflet-control-zoom-reset', zoomBar);
+            btn.href = '#';
+            btn.title = 'Reset zoom';
+            btn.setAttribute('role', 'button');
+            btn.setAttribute('aria-label', 'Reset zoom');
+            btn.innerHTML = ZOOM_RESET_ICON;
+
+            L.DomEvent.disableClickPropagation(btn);
+            L.DomEvent.on(btn, 'click', e => { L.DomEvent.preventDefault(e); resetZoom(); });
+        }
+
+        // Undo any manual pan/zoom by re-fitting to the hotels currently visible, which
+        // is the view the filters produce. Never falls back to the filtered-out hotels:
+        // when the filters leave nothing on the map, reset returns to the overview the
+        // map opens on.
+        function resetZoom() {
+            if (!map) return;
+            if (visiblePoints.length) { fitBoundsToPoints(visiblePoints); return; }
+            map.setView(DEFAULT_CENTER, DEFAULT_ZOOM);
         }
 
         function buildLegendControl() {
