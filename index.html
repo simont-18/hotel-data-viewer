@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <title>Hotel Data Viewer [e40215ad]</title>
+    <title>Hotel Data Viewer [63ce357c]</title>
     <link rel="icon" type="image/svg+xml"
         href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect x='5' y='5' width='90' height='90' rx='18' fill='%231a365d'/%3E%3Crect x='22' y='30' width='36' height='52' fill='%234299e1' rx='2'/%3E%3Cg fill='%23bee3f8'%3E%3Crect x='27' y='36' width='6' height='6' rx='1'/%3E%3Crect x='37' y='36' width='6' height='6' rx='1'/%3E%3Crect x='47' y='36' width='6' height='6' rx='1'/%3E%3Crect x='27' y='47' width='6' height='6' rx='1'/%3E%3Crect x='37' y='47' width='6' height='6' rx='1'/%3E%3Crect x='47' y='47' width='6' height='6' rx='1'/%3E%3Crect x='27' y='58' width='6' height='6' rx='1'/%3E%3Crect x='37' y='58' width='6' height='6' rx='1'/%3E%3Crect x='47' y='58' width='6' height='6' rx='1'/%3E%3C/g%3E%3Crect x='35' y='70' width='10' height='12' fill='%232c5282' rx='1'/%3E%3Cg fill='%2348bb78'%3E%3Crect x='64' y='66' width='6' height='16' rx='1'/%3E%3Crect x='72' y='56' width='6' height='26' rx='1'/%3E%3Crect x='80' y='46' width='6' height='36' rx='1'/%3E%3C/g%3E%3Cpath d='M 64 48 L 72 40 L 78 44 L 86 34' stroke='%23f6ad55' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpolygon points='86,34 82,35 85,39' fill='%23f6ad55'/%3E%3Ccircle cx='30' cy='22' r='6' fill='none' stroke='%23f6ad55' stroke-width='2.5'/%3E%3Cline x1='34.5' y1='26.5' x2='38' y2='30' stroke='%23f6ad55' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -61,6 +61,55 @@
         .drop-zone p {
             color: #888;
             margin-bottom: 20px;
+        }
+
+        /* URL loader: a sibling of the drop zone, so the field sits outside it and
+           spans a wide column that fits long URLs without scrolling the text. */
+        .url-loader {
+            width: min(900px, 80vw);
+            margin-top: 24px;
+            text-align: center;
+        }
+
+        .url-loader-label {
+            display: block;
+            margin-bottom: 8px;
+            color: #888;
+            font-size: 14px;
+        }
+
+        .url-input {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px 12px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            background: white;
+            color: var(--text-color);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 14px;
+        }
+
+        .url-input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(0, 120, 255, 0.18);
+        }
+
+        .url-input:disabled {
+            background: #f5f5f5;
+            color: #999;
+        }
+
+        .url-status {
+            min-height: 18px;
+            margin-top: 8px;
+            font-size: 13px;
+            color: #888;
+        }
+
+        .url-status.error {
+            color: #c62828;
         }
 
         .btn {
@@ -468,6 +517,12 @@
             <label for="jsonFile" class="btn">Choose JSON File</label>
             <input type="file" id="jsonFile" accept=".json, .txt">
         </div>
+        <div class="url-loader">
+            <label for="jsonUrl" class="url-loader-label">Or paste the URL of a JSON file and press Enter</label>
+            <input type="url" id="jsonUrl" class="url-input" placeholder="https://example.com/combined.json"
+                spellcheck="false" autocomplete="off" autocapitalize="off">
+            <div id="urlStatus" class="url-status" role="status" aria-live="polite"></div>
+        </div>
     </div>
 
     <!-- Main app -->
@@ -578,6 +633,7 @@
 
         const welcomeScreen = $id('welcomeScreen'), appContainer = $id('appContainer'), fileInput = $id('jsonFile');
         const dropZone = $id('dropZone'), resetBtn = $id('resetBtn'), tableBody = $id('tableBody'), filterBar = $id('filterBar');
+        const urlInput = $id('jsonUrl'), urlStatus = $id('urlStatus');
         const tabBtns = document.querySelectorAll('.tab-btn');
         const tabPanes = document.querySelectorAll('.tab-pane');
 
@@ -658,26 +714,86 @@
         document.body.addEventListener('drop', e => { if (e.dataTransfer.files.length) processFile(e.dataTransfer.files[0]); });
         fileInput.addEventListener('change', e => processFile(e.target.files[0]));
 
+        const NOT_RESULTS_MESSAGE = 'Error: this is not a hotel-results file (expected an object with a "results" array). Re-run the search to regenerate pre-envelope files.';
+
+        // One entry point for both loaders: parse and validate an envelope, then show it.
+        // Throws a user-facing message so each caller can decide how to present it.
+        function loadJsonText(text) {
+            let json;
+            try {
+                json = JSON.parse(text);
+            } catch (err) {
+                console.error(err);
+                throw new Error('Error parsing JSON file. Please ensure it is valid JSON.');
+            }
+            const rows = json && Array.isArray(json.results) ? json.results : null;
+            if (!rows) throw new Error(NOT_RESULTS_MESSAGE);
+            if (appContainer.style.display === 'flex') clearAppState();
+            jsonDataGlobal = rows;
+            initializeApp(rows);
+        }
+
         function processFile(file) {
             if (!file) return;
-            if (appContainer.style.display === 'flex') clearAppState();
             const reader = new FileReader();
             reader.onload = e => {
-                try {
-                    const json = JSON.parse(e.target.result);
-                    const rows = json && Array.isArray(json.results) ? json.results : null;
-                    if (!rows) {
-                        return alert('Error: this is not a hotel-results file (expected an object with a "results" array). Re-run the search to regenerate pre-envelope files.');
-                    }
-                    jsonDataGlobal = rows;
-                    initializeApp(rows);
-                } catch (err) {
-                    console.error(err);
-                    alert('Error parsing JSON file. Please ensure it is valid JSON.');
-                }
+                try { loadJsonText(e.target.result); }
+                catch (err) { alert(err.message); }
             };
             reader.readAsText(file);
         }
+
+        // URL loader: the same envelope path, fetched instead of read from disk. The page
+        // is normally opened from file://, so the host must allow cross-origin reads.
+        function setUrlStatus(message, isError) {
+            urlStatus.textContent = message || '';
+            urlStatus.classList.toggle('error', !!isError);
+        }
+
+        async function loadFromUrl() {
+            const url = urlInput.value.trim();
+            if (!url) return urlInput.focus();
+
+            // A local path can never be fetched (file:// pages block it and other origins
+            // cannot see the disk). Say so instead of surfacing a generic CORS failure.
+            // A leading slash only means "local" when the viewer itself was opened from disk.
+            const localPath = /^file:/i.test(url) || /^[a-z]:[\\/]/i.test(url)
+                || (location.protocol === 'file:' && /^(?:\.{1,2})?[\\/]/.test(url));
+            if (localPath) {
+                setUrlStatus('That is a local path, which the browser cannot fetch. Use "Choose JSON File" instead, or paste an http(s) URL.', true);
+                return urlInput.select();
+            }
+
+            setUrlStatus('Loading…', false);
+            urlInput.disabled = true;
+            try {
+                let response;
+                try {
+                    response = await fetch(url, { cache: 'no-store' });
+                } catch (err) {
+                    console.error(err);
+                    throw new Error('Could not fetch that URL. Check the address, and that the server allows cross-origin (CORS) reads.');
+                }
+                if (!response.ok) {
+                    const status = `${response.status}${response.statusText ? ' ' + response.statusText : ''}`;
+                    throw new Error(`Could not load that URL (HTTP ${status}).`);
+                }
+                loadJsonText(await response.text());
+                urlInput.value = '';
+                setUrlStatus('', false);
+            } catch (err) {
+                console.error(err);
+                setUrlStatus(err.message, true);
+            } finally {
+                urlInput.disabled = false;
+            }
+        }
+
+        urlInput.addEventListener('keydown', e => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            loadFromUrl();
+        });
 
         function initializeApp(data) {
             welcomeScreen.style.opacity = '0';
@@ -721,7 +837,8 @@
             welcomeScreen.style.opacity = '1';
             clearAppState();
             fileInput.value = '';
-            fileInput.click();
+            urlInput.value = '';
+            setUrlStatus('', false);
         });
 
         // ---------------------------------------------------------------
