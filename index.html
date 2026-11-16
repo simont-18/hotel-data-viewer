@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <title>Hotel Data Viewer [63ce357c]</title>
+    <title>Hotel Data Viewer [369d39ea]</title>
     <link rel="icon" type="image/svg+xml"
         href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect x='5' y='5' width='90' height='90' rx='18' fill='%231a365d'/%3E%3Crect x='22' y='30' width='36' height='52' fill='%234299e1' rx='2'/%3E%3Cg fill='%23bee3f8'%3E%3Crect x='27' y='36' width='6' height='6' rx='1'/%3E%3Crect x='37' y='36' width='6' height='6' rx='1'/%3E%3Crect x='47' y='36' width='6' height='6' rx='1'/%3E%3Crect x='27' y='47' width='6' height='6' rx='1'/%3E%3Crect x='37' y='47' width='6' height='6' rx='1'/%3E%3Crect x='47' y='47' width='6' height='6' rx='1'/%3E%3Crect x='27' y='58' width='6' height='6' rx='1'/%3E%3Crect x='37' y='58' width='6' height='6' rx='1'/%3E%3Crect x='47' y='58' width='6' height='6' rx='1'/%3E%3C/g%3E%3Crect x='35' y='70' width='10' height='12' fill='%232c5282' rx='1'/%3E%3Cg fill='%2348bb78'%3E%3Crect x='64' y='66' width='6' height='16' rx='1'/%3E%3Crect x='72' y='56' width='6' height='26' rx='1'/%3E%3Crect x='80' y='46' width='6' height='36' rx='1'/%3E%3C/g%3E%3Cpath d='M 64 48 L 72 40 L 78 44 L 86 34' stroke='%23f6ad55' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpolygon points='86,34 82,35 85,39' fill='%23f6ad55'/%3E%3Ccircle cx='30' cy='22' r='6' fill='none' stroke='%23f6ad55' stroke-width='2.5'/%3E%3Cline x1='34.5' y1='26.5' x2='38' y2='30' stroke='%23f6ad55' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -716,9 +716,38 @@
 
         const NOT_RESULTS_MESSAGE = 'Error: this is not a hotel-results file (expected an object with a "results" array). Re-run the search to regenerate pre-envelope files.';
 
+        // The loaded file's URL lives in the address bar as ?dataUrl=..., so the page can
+        // be linked to directly and a reload (or a copied address) reopens the same data.
+        const DATA_URL_PARAM = 'dataUrl';
+
+        function getDataUrlParam() {
+            try {
+                return new URLSearchParams(location.search).get(DATA_URL_PARAM) || '';
+            } catch (err) {
+                console.warn('Could not read the dataUrl request parameter.', err);
+                return '';
+            }
+        }
+
+        // Mirror the loaded source into the address bar. A file picked from disk has no
+        // URL of its own, so it clears the parameter. file:// pages can refuse the history
+        // update; the data is already loaded, so that failure is only worth a warning.
+        function setDataUrlParam(url) {
+            try {
+                const next = new URL(location.href);
+                if (url) next.searchParams.set(DATA_URL_PARAM, url);
+                else next.searchParams.delete(DATA_URL_PARAM);
+                history.replaceState(history.state, '', next.href);
+            } catch (err) {
+                console.warn('Could not put the data URL in the address bar.', err);
+            }
+        }
+
         // One entry point for both loaders: parse and validate an envelope, then show it.
         // Throws a user-facing message so each caller can decide how to present it.
-        function loadJsonText(text) {
+        // `sourceUrl` is the address the text came from, if any, and is recorded in the
+        // address bar once the envelope proves valid.
+        function loadJsonText(text, sourceUrl) {
             let json;
             try {
                 json = JSON.parse(text);
@@ -728,6 +757,9 @@
             }
             const rows = json && Array.isArray(json.results) ? json.results : null;
             if (!rows) throw new Error(NOT_RESULTS_MESSAGE);
+
+            setDataUrlParam(sourceUrl || '');
+
             if (appContainer.style.display === 'flex') clearAppState();
             jsonDataGlobal = rows;
             initializeApp(rows);
@@ -778,7 +810,8 @@
                     const status = `${response.status}${response.statusText ? ' ' + response.statusText : ''}`;
                     throw new Error(`Could not load that URL (HTTP ${status}).`);
                 }
-                loadJsonText(await response.text());
+                // Record the URL the fetch actually landed on, after any redirects.
+                loadJsonText(await response.text(), response.url || url);
                 urlInput.value = '';
                 setUrlStatus('', false);
             } catch (err) {
@@ -794,6 +827,15 @@
             e.preventDefault();
             loadFromUrl();
         });
+
+        // A shared address carries the file: load it as soon as the page opens. Failures
+        // land in the URL status line under the field, which is still on screen.
+        function loadFromDataUrlParam() {
+            const initialUrl = getDataUrlParam();
+            if (!initialUrl) return;
+            urlInput.value = initialUrl;
+            loadFromUrl();
+        }
 
         function initializeApp(data) {
             welcomeScreen.style.opacity = '0';
@@ -839,6 +881,8 @@
             fileInput.value = '';
             urlInput.value = '';
             setUrlStatus('', false);
+            // "Load New File" means the loaded data no longer comes from that address.
+            setDataUrlParam('');
         });
 
         // ---------------------------------------------------------------
@@ -1359,6 +1403,9 @@
                 console.warn('Could not fit the map to the filtered results.', err);
             }
         }
+
+        // Start from the address bar, if it names a file.
+        loadFromDataUrlParam();
     </script>
 </body>
 
